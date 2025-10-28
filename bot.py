@@ -5,11 +5,11 @@ import base64
 import hashlib
 import time
 import threading
-import requests  # ← NEW: For BIN APIs
+import requests
 from datetime import datetime
 
 from pyrogram import Client, filters
-from pyrogram.types import ForceReply
+from pyrogram.types import ForceReply, InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ParseMode
 import stripe
 from cryptography.fernet import Fernet
@@ -20,69 +20,99 @@ app = Client("mogambo_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKE
 stripe.api_key = STRIPE_KEY
 state = {}
 
-# === BIN CHECKER FUNCTION (NEW) ===
+# === BIN CHECKER (NEW & WORKING) ===
 def check_bin(bin_digits):
-    """Check BIN using 3 free APIs (fallback if one fails)"""
-    bin_str = str(bin_digits)[:6]  # First 6 digits only
+    bin_str = str(bin_digits)[:6]
     if len(bin_str) < 6:
-        return {"error": "BIN must be at least 6 digits"}
-    
+        return {"error": "BIN must be 6 digits"}
+
+    headers = {'User-Agent': 'MogamboBot/1.0'}
     apis = [
-        f"https://lookup.binlist.net/{bin_str}",  # API 1: binlist.net
-        f"https://api.freebinchecker.com/bin/{bin_str}",  # API 2: freebinchecker.com
-        f"https://api.bincodes.com/bin/?format=json&bin={bin_str}"  # API 3: bincodes.com
+        f"https://binlist.io/lookup/{bin_str}/",
+        f"https://lookup.binlist.net/{bin_str}",
+        "https://neutrinoapi.net/bin-lookup"
     ]
-    
-    for api_url in apis:
+
+    for url in apis:
         try:
-            response = requests.get(api_url, timeout=5)
+            if "neutrinoapi" in url:
+                payload = {"bin-number": bin_str}
+                response = requests.post(url, data=payload, headers=headers, timeout=7)
+            else:
+                response = requests.get(url, headers=headers, timeout=7)
+
             if response.status_code == 200:
                 data = response.json()
-                # Parse common fields (adapt to API response)
-                if 'scheme' in data or 'card' in data:
-                    # freebinchecker format
+
+                # binlist.io
+                if 'valid' in data:
                     return {
-                        'brand': data.get('card', {}).get('scheme', 'Unknown'),
-                        'type': data.get('card', {}).get('type', 'Unknown'),
-                        'bank': data.get('issuer', {}).get('name', 'Unknown'),
+                        'brand': data.get('scheme', 'Unknown').title(),
+                        'type': data.get('type', 'Unknown').title(),
+                        'bank': data.get('bank', {}).get('name', 'Unknown'),
                         'country': data.get('country', {}).get('name', 'Unknown'),
-                        'valid': data.get('valid', False)
+                        'valid': data['valid']
                     }
-                elif 'number' in data:
-                    # binlist.net format
+                # binlist.net
+                elif 'scheme' in data:
                     return {
-                        'brand': data.get('scheme', 'Unknown'),
-                        'type': data.get('type', 'Unknown'),
+                        'brand': data.get('scheme', 'Unknown').title(),
+                        'type': data.get('type', 'Unknown').title(),
                         'bank': data.get('bank', {}).get('name', 'Unknown'),
                         'country': data.get('country', {}).get('name', 'Unknown'),
                         'valid': True
                     }
-                elif 'bin' in data:
-                    # bincodes format
-                    return {
-                        'brand': data.get('card', 'Unknown'),
-                        'type': data.get('type', 'Unknown'),
-                        'bank': data.get('bank', 'Unknown'),
-                        'country': data.get('country', 'Unknown'),
-                        'valid': data.get('valid', False)
-                    }
-        except Exception:
-            continue  # Try next API
-    
-    return {"error": "BIN not found in any database"}
+        except:
+            continue
 
-def format_bin_result(bin_info):
-    """Format BIN result for message"""
-    if 'error' in bin_info:
-        return f"BIN Error: {bin_info['error']}"
-    
+    return {"error": "BIN not found"}
+
+def format_bin_result(info):
+    if 'error' in info:
+        return f"Error: {info['error']}"
     return (
-        f"**BIN Info:**\n"
-        f"• Brand: `{bin_info['brand']}`\n"
-        f"• Type: `{bin_info['type']}`\n"
-        f"• Bank: `{bin_info['bank']}`\n"
-        f"• Country: `{bin_info['country']}`\n"
-        f"• Valid: {'Yes' if bin_info['valid'] else 'No'}"
+        f"**BIN Lookup Result**\n"
+        f"• Brand: `{info['brand']}`\n"
+        f"• Type: `{info['type']}`\n"
+        f"• Bank: `{info['bank']}`\n"
+        f"• Country: `{info['country']}`\n"
+        f"• Valid: `{'Yes' if info['valid'] else 'No'}`"
+    )
+
+# === PHONE LOOKUP (WORKING) ===
+def check_phone(number):
+    if not number.startswith('+'):
+        number = '+' + number.replace('+', '')
+
+    try:
+        url = f"https://api.apilayer.com/numverify?number={number}"
+        headers = {"apikey": "demo"}  # Free tier
+        res = requests.get(url, headers=headers, timeout=7)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('valid'):
+                return {
+                    'valid': True,
+                    'country': data.get('country_name', 'Unknown'),
+                    'carrier': data.get('carrier', 'Unknown'),
+                    'type': data.get('line_type', 'Unknown'),
+                    'location': data.get('location', 'Unknown')
+                }
+    except:
+        pass
+
+    return {"error": "Phone info not available"}
+
+def format_phone_result(info):
+    if 'error' in info:
+        return f"Error: {info['error']}"
+    return (
+        f"**Phone Lookup**\n"
+        f"• Valid: `Yes`\n"
+        f"• Country: `{info['country']}`\n"
+        f"• Carrier: `{info['carrier']}`\n"
+        f"• Type: `{info['type']}`\n"
+        f"• Location: `{info['location']}`"
     )
 
 # === ENCRYPTION ===
@@ -92,258 +122,214 @@ def get_fernet():
 
 def save_data(entry):
     f = get_fernet()
-    if os.path.exists('my_personal_card_data.enc'):
-        with open('my_personal_card_data.enc', 'rb') as file:
-            enc = file.read()
+    path = 'my_personal_card_data.enc'
+    lst = []
+    if os.path.exists(path):
         try:
-            dec = f.decrypt(enc)
-            lst = json.loads(dec)
-        except:
-            lst = []
-    else:
-        lst = []
+            with open(path, 'rb') as file:
+                lst = json.loads(f.decrypt(file.read()))
+        except: pass
     lst.append(entry)
-    enc_new = f.encrypt(json.dumps(lst).encode())
-    with open('my_personal_card_data.enc', 'wb') as file:
-        file.write(enc_new)
+    with open(path, 'wb') as file:
+        file.write(f.encrypt(json.dumps(lst).encode()))
 
 def load_data():
-    if not os.path.exists('my_personal_card_data.enc'):
-        return []
+    path = 'my_personal_card_data.enc'
+    if not os.path.exists(path): return []
     f = get_fernet()
     try:
-        with open('my_personal_card_data.enc', 'rb') as file:
-            enc = file.read()
-        dec = f.decrypt(enc)
-        return json.loads(dec)
-    except:
-        return []
+        with open(path, 'rb') as file:
+            return json.loads(f.decrypt(file.read()))
+    except: return []
 
-# === CARD PROCESSING ===
-def do_auth(message, cmd, info, card, mm, yy, cvc, bin_info=None):
+# === CARD AUTH ===
+def do_auth(message, cmd, info, card, mm, yy, cvc, bin_info=None, phone_info=None):
     last4 = card[-4:]
     success = False
-    result_msg = ""
+    result = ""
+
     try:
-        mm = int(mm)
-        yy = int(yy)
-        if yy < 100:
-            yy += 2000
+        mm, yy = int(mm), int(yy)
+        if yy < 100: yy += 2000
 
         pm = stripe.PaymentMethod.create(
             type="card",
-            card={"number": card, "exp_month": mm, "exp_year": yy, "cvc": cvc},
+            card={"number": card, "exp_month": mm, "exp_year": yy, "cvc": cvc}
         )
 
         if cmd == 'check':
             si = stripe.SetupIntent.create(payment_method=pm.id, confirm=True, usage="off_session")
-            if si.status in ['succeeded', 'requires_capture']:
-                result_msg = f"Card is valid! (Last 4: {last4})"
-                success = True
-            else:
-                result_msg = "Validation failed."
+            success = si.status in ['succeeded', 'requires_capture']
+            result = f"Card is valid! (Last 4: {last4})" if success else "Validation failed."
         elif cmd == 'hold':
             for _ in range(15):
                 pi = stripe.PaymentIntent.create(
                     amount=1, currency="usd", payment_method=pm.id, confirm=True, capture_method="manual"
                 )
                 if pi.status != "requires_capture":
-                    raise Exception("Auth failed.")
-            result_msg = f"15x $0.01 auth sent. Card (Last 4: {last4}) on hold (1-24 hrs)."
+                    raise Exception("Hold failed")
+            result = f"15x $0.01 hold placed. (Last 4: {last4})"
             success = True
-
-    except stripe.error.CardError as e:
-        result_msg = f"Card Error: {e.user_message} (Code: {e.code})"
-    except stripe.error.StripeError as e:
-        result_msg = f"Stripe Error: {e.user_message or str(e)}"
     except Exception as e:
-        result_msg = f"Error: {str(e)}"
+        result = f"Error: {str(e)[:100]}"
 
-    # BIN info if available
-    full_msg = result_msg
-    if bin_info:
-        full_msg = format_bin_result(bin_info) + "\n\n" + result_msg
+    # Combine
+    msg = result
+    if bin_info: msg = format_bin_result(bin_info) + "\n\n" + msg
+    if phone_info: msg = format_phone_result(phone_info) + "\n\n" + msg
 
-    message.reply(full_msg, parse_mode=ParseMode.MARKDOWN)
+    message.reply(msg, parse_mode=ParseMode.MARKDOWN)
 
-    entry = {
+    save_data({
         'timestamp': datetime.now().isoformat(),
         'command': cmd,
-        'name': info.get('name', '') if info else '',
-        'zip': info.get('zip', '') if info else '',
-        'address': info.get('address', '') if info else '',
-        'phone': info.get('phone', '') if info else '',
-        'email': info.get('email', '') if info else '',
+        'name': info.get('name', ''),
+        'phone': info.get('phone', ''),
         'card': card,
-        'exp_month': mm,
-        'exp_year': yy,
-        'cvc': cvc,
-        'bin_info': bin_info,  # ← NEW: Save BIN data
+        'bin_info': bin_info,
+        'phone_info': phone_info,
         'result': 'success' if success else 'failed'
-    }
-    save_data(entry)
+    })
 
-# === CARD PROCESSING WITH CONFIRM ===
+# === PROCESS CARD ===
 def process_card(message, cmd, info, card, mm, yy, cvc):
-    # ← NEW: BIN check before auth
-    bin_digits = int(card[:6])
-    bin_info = check_bin(bin_digits)
+    bin_info = check_bin(card[:6])
     message.reply(format_bin_result(bin_info), parse_mode=ParseMode.MARKDOWN)
-    
+
+    phone = info.get('phone', '')
+    phone_info = check_phone(phone) if phone else None
+
     if cmd == 'check':
-        do_auth(message, cmd, info, card, mm, yy, cvc, bin_info)
-    elif cmd == 'hold':
-        state['pending'] = {'cmd': cmd, 'info': info, 'card': card, 'mm': mm, 'yy': yy, 'cvc': cvc, 'bin_info': bin_info}
-        def timeout():
-            if 'pending' in state:
-                message.reply("Hold cancelled (60s timeout).")
-                state.pop('pending', None)
-                state.pop('timer', None)
-        timer = threading.Timer(60, timeout)
+        do_auth(message, cmd, info, card, mm, yy, cvc, bin_info, phone_info)
+    else:  # hold
+        state['pending'] = {
+            'cmd': cmd, 'info': info, 'card': card, 'mm': mm, 'yy': yy, 'cvc': cvc,
+            'bin_info': bin_info, 'phone_info': phone_info
+        }
+        timer = threading.Timer(60, lambda: state.pop('pending', None) or message.reply("Hold cancelled (timeout)."))
         timer.start()
         state['timer'] = timer
         message.reply("Send **YES** to confirm 15x $0.01 hold.", parse_mode=ParseMode.MARKDOWN, reply_markup=ForceReply())
 
-# === CUSTOM FILTER: Text + Owner + Not Command ===
-def is_text_non_command(_, __, m):
-    return m.text and m.from_user and m.from_user.id == OWNER_ID and not m.command
+# === FILTERS ===
+text_non_command = filters.create(lambda _, __, m: m.text and m.from_user.id == OWNER_ID and not m.command)
 
-text_non_command = filters.create(is_text_non_command)
-
-# === NEW: BIN COMMAND HANDLER ===
+# === /bin WITH BUTTONS ===
 @app.on_message(filters.command("bin") & filters.user(OWNER_ID))
-def bin_handler(client, message):
-    args = message.command[1:]
-    if not args:
-        message.reply("Usage: `/bin <first6digits>` e.g., `/bin 424242`", parse_mode=ParseMode.MARKDOWN)
-        return
-    
-    try:
-        bin_digits = int(''.join(args))
-        bin_info = check_bin(bin_digits)
-        message.reply(format_bin_result(bin_info), parse_mode=ParseMode.MARKDOWN)
-    except ValueError:
-        message.reply("Invalid BIN. Use numbers only (first 6 digits).")
+def bin_menu(client, message):
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Visa", callback_data="bin:424242")],
+        [InlineKeyboardButton("MasterCard", callback_data="bin:555555")],
+        [InlineKeyboardButton("Amex", callback_data="bin:378282")],
+        [InlineKeyboardButton("Custom BIN", callback_data="bin:custom")]
+    ])
+    message.reply("*BIN Checker*\nClick or reply with 6 digits.", reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
-# === HANDLERS ===
+@app.on_callback_query(filters.regex(r"^bin:") & filters.user(OWNER_ID))
+def bin_callback(client, query):
+    data = query.data.split(":", 1)[1]
+    if data == "custom":
+        query.message.reply("Reply with 6-digit BIN:", reply_markup=ForceReply())
+    else:
+        info = check_bin(data)
+        query.message.reply(format_bin_result(info), parse_mode=ParseMode.MARKDOWN)
+    query.answer()
+
+# === /phone ===
+@app.on_message(filters.command("phone") & filters.user(OWNER_ID))
+def phone_lookup(client, message):
+    if len(message.command) < 2:
+        message.reply("Usage: `/phone +1234567890`", parse_mode=ParseMode.MARKDOWN)
+        return
+    num = message.text.split(maxsplit=1)[1]
+    info = check_phone(num)
+    message.reply(format_phone_result(info), parse_mode=ParseMode.MARKDOWN)
+
+# === /start ===
 @app.on_message(filters.command("start") & filters.user(OWNER_ID))
 def start(client, message):
     message.reply(
-        "*Dark_Shadow Killer*\n\n"
-         "*MOGAMBO KHUSH HUA*\n\n"
-        "`/bin <6digits>` → BIN checker (NEW!)\n"  # ← NEW
-        "`/check` → validation + BIN\n"
-        "`/hold` → 15x → killer+ BIN\n"
-        "`/my_data` → view saved\n\n"
-        "Card daalo!_",
+        "*Mogambo Pro Bot*\n\n"
+        "`/bin` → BIN Checker (Buttons)\n"
+        "`/phone <num>` → Phone Info\n"
+        "`/check` → Validate + BIN + Phone\n"
+        "`/hold` → 15x $0.01 Hold\n"
+        "`/my_data` → View Saved\n\n"
+        "_Sirf apna card daalo!_",
         parse_mode=ParseMode.MARKDOWN
     )
 
+# === /check /hold ===
 @app.on_message(filters.command(["check", "hold"]) & filters.user(OWNER_ID))
-def command_handler(client, message):
+def cmd_handler(client, message):
     cmd = message.command[0]
     args = message.command[1:]
 
     if len(args) == 4:
         card, mm, yy, cvc = args
-        info = state.pop('info', None) if 'info' in state and state.get('command') == cmd else None
-        if 'command' in state: state.pop('command')
+        info = state.pop('info', {}) if 'info' in state else {}
         process_card(message, cmd, info, card, mm, yy, cvc)
-    elif len(args) == 0:
-        if 'step' in state:
-            message.reply("Complete current info collection.")
-            return
-        state['command'] = cmd
-        state['step'] = 'name'
-        state['info'] = {}
+    elif not args:
+        state.update({'command': cmd, 'step': 'name', 'info': {}})
         message.reply("Enter *Full Name*:", parse_mode=ParseMode.MARKDOWN, reply_markup=ForceReply())
     else:
-        message.reply(
-            f"Invalid format!\n\n"
-            f"Direct: `/{cmd} 4242424242424242 12 25 123`\n"
-            f"Or: `/{cmd}` → fill info step-by-step",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        message.reply("Format: `/{cmd} card mm yy cvc`", parse_mode=ParseMode.MARKDOWN)
 
+# === /my_data ===
 @app.on_message(filters.command("my_data") & filters.user(OWNER_ID))
-def my_data_handler(client, message):
+def my_data(client, message):
     data = load_data()
     if not data:
-        message.reply("No data saved yet.")
+        message.reply("No data.")
         return
+    text = "*Saved Entries*\n\n"
+    for i, e in enumerate(data, 1):
+        last4 = e['card'][-4:] if e.get('card') else 'N/A'
+        bin_str = f"{e['bin_info'].get('brand','?')} ({e['bin_info'].get('bank','?')})" if e.get('bin_info') else 'N/A'
+        phone_str = f"{e['phone_info'].get('carrier','?')} ({e['phone_info'].get('country','?')})" if e.get('phone_info') else 'N/A'
+        text += f"*{i}. {e['timestamp'][:19].replace('T',' ')}*\n"
+        text += f"Cmd: `{e['command']}` | Card: `****{last4}`\n"
+        text += f"BIN: `{bin_str}`\n"
+        text += f"Phone: `{e.get('phone','N/A')}` | `{phone_str}`\n"
+        text += f"Result: `{e['result']}`\n\n"
+    message.reply(text, parse_mode=ParseMode.MARKDOWN)
 
-    text = "*Saved Card Data*\n\n"
-    for i, entry in enumerate(data, 1):
-        last4 = entry['card'][-4:] if entry.get('card') else 'N/A'
-        bin_info = entry.get('bin_info', {})
-        bin_str = f"{bin_info.get('brand', 'Unknown')} ({bin_info.get('bank', 'Unknown')})" if bin_info else 'N/A'
-        text += f"*{i}. {entry['timestamp'][:19].replace('T', ' ')}*\n"
-        text += f"Cmd: `{entry['command']}`\n"
-        text += f"Name: `{entry.get('name', 'N/A')}`\n"
-        text += f"ZIP: `{entry.get('zip', 'N/A')}`\n"
-        text += f"Address: `{entry.get('address', 'N/A')}`\n"
-        text += f"Phone: `{entry.get('phone', 'N/A')}`\n"
-        text += f"Email: `{entry.get('email', 'N/A')}`\n"
-        text += f"Card: `****{last4}` | BIN: `{bin_str}`\n"  # ← NEW: Show BIN in data
-        text += f"Result: `{entry['result']}`\n\n"
-
-    if len(text) > 4000:
-        for part in [text[i:i+4000] for i in range(0, len(text), 4000)]:
-            message.reply(part, parse_mode=ParseMode.MARKDOWN)
-    else:
-        message.reply(text, parse_mode=ParseMode.MARKDOWN)
-
+# === TEXT HANDLER ===
 @app.on_message(text_non_command)
-def text_handler(client, message):
-    if 'pending' in state:
-        if message.text.strip().upper() == 'YES':
-            if 'timer' in state: state['timer'].cancel()
-            pending = state.pop('pending')
-            state.pop('timer', None)
-            do_auth(message, pending['cmd'], pending['info'], pending['card'],
-                    pending['mm'], pending['yy'], pending['cvc'], pending.get('bin_info'))
-        else:
-            if 'timer' in state: state['timer'].cancel()
-            state.pop('pending', None)
-            state.pop('timer', None)
-            message.reply("Hold cancelled.")
+def text_input(client, message):
+    if 'pending' in state and message.text.upper() == 'YES':
+        pending = state.pop('pending')
+        state.pop('timer', None)
+        do_auth(message, **pending)
         return
 
     if 'step' not in state:
+        # Custom BIN reply
+        if message.reply_to_message and "Reply with 6-digit BIN" in message.reply_to_message.text:
+            try:
+                info = check_bin(int(message.text.strip()))
+                message.reply(format_bin_result(info), parse_mode=ParseMode.MARKDOWN)
+            except:
+                message.reply("Invalid BIN.")
+            return
         return
 
     step = state['step']
     text = message.text.strip()
+    info = state['info']
 
-    if step == 'name':
-        state['info']['name'] = text
-        state['step'] = 'zip'
-        message.reply("Enter *ZIP Code*:", parse_mode=ParseMode.MARKDOWN, reply_markup=ForceReply())
-    elif step == 'zip':
-        state['info']['zip'] = text
-        state['step'] = 'address'
-        message.reply("Enter *Address*:", parse_mode=ParseMode.MARKDOWN, reply_markup=ForceReply())
-    elif step == 'address':
-        state['info']['address'] = text
-        state['step'] = 'phone'
-        message.reply("Enter *Phone Number*:", parse_mode=ParseMode.MARKDOWN, reply_markup=ForceReply())
-    elif step == 'phone':
-        state['info']['phone'] = text
-        state['step'] = 'email'
-        message.reply("Enter *Email*:", parse_mode=ParseMode.MARKDOWN, reply_markup=ForceReply())
-    elif step == 'email':
-        state['info']['email'] = text
+    steps = ['name', 'zip', 'address', 'phone', 'email']
+    if step == steps[-1]:
+        info[step] = text
         cmd = state.pop('command')
         state.pop('step')
-        message.reply(
-            f"Info saved!\n\n"
-            f"Send card:\n`/{cmd} <card> <mm> <yy> <cvc>`\n"
-            f"Example: `/{cmd} 4242424242424242 12 25 123`",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        message.reply(f"Info saved! Send: `/{cmd} card mm yy cvc`", parse_mode=ParseMode.MARKDOWN)
+    else:
+        info[step] = text
+        state['step'] = steps[steps.index(step) + 1]
+        message.reply(f"Enter *{state['step'].title() if state['step'] != 'zip' else 'ZIP Code'}^:*", parse_mode=ParseMode.MARKDOWN, reply_markup=ForceReply())
 
 # === RUN ===
 if __name__ == "__main__":
     print("Mogambo Bot Starting...")
     app.run()
-
