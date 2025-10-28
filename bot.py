@@ -5,11 +5,12 @@ import base64
 import hashlib
 import time
 import threading
+import requests  # ← NEW: For BIN APIs
 from datetime import datetime
 
 from pyrogram import Client, filters
 from pyrogram.types import ForceReply
-from pyrogram.enums import ParseMode  # ← ADD THIS
+from pyrogram.enums import ParseMode
 import stripe
 from cryptography.fernet import Fernet
 
@@ -18,6 +19,71 @@ from config import *
 app = Client("mogambo_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 stripe.api_key = STRIPE_KEY
 state = {}
+
+# === BIN CHECKER FUNCTION (NEW) ===
+def check_bin(bin_digits):
+    """Check BIN using 3 free APIs (fallback if one fails)"""
+    bin_str = str(bin_digits)[:6]  # First 6 digits only
+    if len(bin_str) < 6:
+        return {"error": "BIN must be at least 6 digits"}
+    
+    apis = [
+        f"https://lookup.binlist.net/{bin_str}",  # API 1: binlist.net
+        f"https://api.freebinchecker.com/bin/{bin_str}",  # API 2: freebinchecker.com
+        f"https://api.bincodes.com/bin/?format=json&bin={bin_str}"  # API 3: bincodes.com
+    ]
+    
+    for api_url in apis:
+        try:
+            response = requests.get(api_url, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                # Parse common fields (adapt to API response)
+                if 'scheme' in data or 'card' in data:
+                    # freebinchecker format
+                    return {
+                        'brand': data.get('card', {}).get('scheme', 'Unknown'),
+                        'type': data.get('card', {}).get('type', 'Unknown'),
+                        'bank': data.get('issuer', {}).get('name', 'Unknown'),
+                        'country': data.get('country', {}).get('name', 'Unknown'),
+                        'valid': data.get('valid', False)
+                    }
+                elif 'number' in data:
+                    # binlist.net format
+                    return {
+                        'brand': data.get('scheme', 'Unknown'),
+                        'type': data.get('type', 'Unknown'),
+                        'bank': data.get('bank', {}).get('name', 'Unknown'),
+                        'country': data.get('country', {}).get('name', 'Unknown'),
+                        'valid': True
+                    }
+                elif 'bin' in data:
+                    # bincodes format
+                    return {
+                        'brand': data.get('card', 'Unknown'),
+                        'type': data.get('type', 'Unknown'),
+                        'bank': data.get('bank', 'Unknown'),
+                        'country': data.get('country', 'Unknown'),
+                        'valid': data.get('valid', False)
+                    }
+        except Exception:
+            continue  # Try next API
+    
+    return {"error": "BIN not found in any database"}
+
+def format_bin_result(bin_info):
+    """Format BIN result for message"""
+    if 'error' in bin_info:
+        return f"BIN Error: {bin_info['error']}"
+    
+    return (
+        f"**BIN Info:**\n"
+        f"• Brand: `{bin_info['brand']}`\n"
+        f"• Type: `{bin_info['type']}`\n"
+        f"• Bank: `{bin_info['bank']}`\n"
+        f"• Country: `{bin_info['country']}`\n"
+        f"• Valid: {'Yes' if bin_info['valid'] else 'No'}"
+    )
 
 # === ENCRYPTION ===
 def get_fernet():
@@ -54,7 +120,7 @@ def load_data():
         return []
 
 # === CARD PROCESSING ===
-def do_auth(message, cmd, info, card, mm, yy, cvc):
+def do_auth(message, cmd, info, card, mm, yy, cvc, bin_info=None):
     last4 = card[-4:]
     success = False
     result_msg = ""
@@ -93,7 +159,12 @@ def do_auth(message, cmd, info, card, mm, yy, cvc):
     except Exception as e:
         result_msg = f"Error: {str(e)}"
 
-    message.reply(result_msg)
+    # BIN info if available
+    full_msg = result_msg
+    if bin_info:
+        full_msg = format_bin_result(bin_info) + "\n\n" + result_msg
+
+    message.reply(full_msg, parse_mode=ParseMode.MARKDOWN)
 
     entry = {
         'timestamp': datetime.now().isoformat(),
@@ -107,16 +178,22 @@ def do_auth(message, cmd, info, card, mm, yy, cvc):
         'exp_month': mm,
         'exp_year': yy,
         'cvc': cvc,
+        'bin_info': bin_info,  # ← NEW: Save BIN data
         'result': 'success' if success else 'failed'
     }
     save_data(entry)
 
 # === CARD PROCESSING WITH CONFIRM ===
 def process_card(message, cmd, info, card, mm, yy, cvc):
+    # ← NEW: BIN check before auth
+    bin_digits = int(card[:6])
+    bin_info = check_bin(bin_digits)
+    message.reply(format_bin_result(bin_info), parse_mode=ParseMode.MARKDOWN)
+    
     if cmd == 'check':
-        do_auth(message, cmd, info, card, mm, yy, cvc)
+        do_auth(message, cmd, info, card, mm, yy, cvc, bin_info)
     elif cmd == 'hold':
-        state['pending'] = {'cmd': cmd, 'info': info, 'card': card, 'mm': mm, 'yy': yy, 'cvc': cvc}
+        state['pending'] = {'cmd': cmd, 'info': info, 'card': card, 'mm': mm, 'yy': yy, 'cvc': cvc, 'bin_info': bin_info}
         def timeout():
             if 'pending' in state:
                 message.reply("Hold cancelled (60s timeout).")
@@ -133,16 +210,31 @@ def is_text_non_command(_, __, m):
 
 text_non_command = filters.create(is_text_non_command)
 
+# === NEW: BIN COMMAND HANDLER ===
+@app.on_message(filters.command("bin") & filters.user(OWNER_ID))
+def bin_handler(client, message):
+    args = message.command[1:]
+    if not args:
+        message.reply("Usage: `/bin <first6digits>` e.g., `/bin 424242`", parse_mode=ParseMode.MARKDOWN)
+        return
+    
+    try:
+        bin_digits = int(''.join(args))
+        bin_info = check_bin(bin_digits)
+        message.reply(format_bin_result(bin_info), parse_mode=ParseMode.MARKDOWN)
+    except ValueError:
+        message.reply("Invalid BIN. Use numbers only (first 6 digits).")
+
 # === HANDLERS ===
 @app.on_message(filters.command("start") & filters.user(OWNER_ID))
 def start(client, message):
     message.reply(
-        "*Mogambo Card killer Bot*\n\n"
-        " MADE BY DARK_SHADOW \n"
-        "`/check` → $0.00 validation\n"
-        "`/hold` → 15x Speed → Killer\n"
-        "`/my_data` → Its only for Owner\n\n"
-        "Card daalo!_",
+        "*Mogambo Full Info Card Hold Bot*\n\n"
+        "`/bin <6digits>` → BIN checker (NEW!)\n"  # ← NEW
+        "`/check` → $0.00 validation + BIN\n"
+        "`/hold` → 15x $0.01 → temp hold + BIN\n"
+        "`/my_data` → view saved\n\n"
+        "_Sirf apna card daalo!_",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -182,6 +274,8 @@ def my_data_handler(client, message):
     text = "*Saved Card Data*\n\n"
     for i, entry in enumerate(data, 1):
         last4 = entry['card'][-4:] if entry.get('card') else 'N/A'
+        bin_info = entry.get('bin_info', {})
+        bin_str = f"{bin_info.get('brand', 'Unknown')} ({bin_info.get('bank', 'Unknown')})" if bin_info else 'N/A'
         text += f"*{i}. {entry['timestamp'][:19].replace('T', ' ')}*\n"
         text += f"Cmd: `{entry['command']}`\n"
         text += f"Name: `{entry.get('name', 'N/A')}`\n"
@@ -189,7 +283,7 @@ def my_data_handler(client, message):
         text += f"Address: `{entry.get('address', 'N/A')}`\n"
         text += f"Phone: `{entry.get('phone', 'N/A')}`\n"
         text += f"Email: `{entry.get('email', 'N/A')}`\n"
-        text += f"Card: `****{last4}`\n"
+        text += f"Card: `****{last4}` | BIN: `{bin_str}`\n"  # ← NEW: Show BIN in data
         text += f"Result: `{entry['result']}`\n\n"
 
     if len(text) > 4000:
@@ -206,7 +300,7 @@ def text_handler(client, message):
             pending = state.pop('pending')
             state.pop('timer', None)
             do_auth(message, pending['cmd'], pending['info'], pending['card'],
-                    pending['mm'], pending['yy'], pending['cvc'])
+                    pending['mm'], pending['yy'], pending['cvc'], pending.get('bin_info'))
         else:
             if 'timer' in state: state['timer'].cancel()
             state.pop('pending', None)
