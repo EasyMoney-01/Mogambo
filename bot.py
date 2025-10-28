@@ -229,12 +229,13 @@ def bin_handler(client, message):
 @app.on_message(filters.command("start") & filters.user(OWNER_ID))
 def start(client, message):
     message.reply(
-        "*Mogambo Full Info Card Hold Bot*\n\n"
+        "*Dark_Shadow Killer*\n\n"
+         "*MOGAMBO KHUSH HUA*\n\n"
         "`/bin <6digits>` → BIN checker (NEW!)\n"  # ← NEW
-        "`/check` → $0.00 validation + BIN\n"
-        "`/hold` → 15x $0.01 → temp hold + BIN\n"
+        "`/check` → validation + BIN\n"
+        "`/hold` → 15x → killer+ BIN\n"
         "`/my_data` → view saved\n\n"
-        "_Sirf apna card daalo!_",
+        "Card daalo!_",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -345,3 +346,4 @@ def text_handler(client, message):
 if __name__ == "__main__":
     print("Mogambo Bot Starting...")
     app.run()
+
